@@ -9,6 +9,24 @@ use crate::frame::FromCursor;
 use crate::types::data_serialization_types::decode_timeuuid;
 use crate::types::{from_bytes, from_u16_bytes, CStringList, UUID_LEN};
 
+/// Create a protocol error message
+fn make_protocol_error(msg: &str) -> CDRSError {
+    CDRSError {
+        error_code: 0x000A, // protocol error
+        message: CString::new(msg.to_string()),
+        additional_info: AdditionalErrorInfo::Protocol(SimpleError {}),
+    }
+}
+
+/// Create a server error message
+fn make_server_error(msg: &str) -> CDRSError {
+    CDRSError {
+        error_code: 0x0000, // server error
+        message: CString::new(msg.to_string()),
+        additional_info: AdditionalErrorInfo::Protocol(SimpleError {}),
+    }
+}
+
 pub fn parse_frame<E>(
     cursor_cell: &RefCell<dyn Read>,
     compressor: &dyn Compressor<CompressorError = E>,
@@ -25,12 +43,22 @@ where
 
     // NOTE: order of reads matters
     cursor.read_exact(&mut version_bytes)?;
+    // check the version before we progress
+    let version = match Version::from(version_bytes.to_vec()) {
+        Version::Other(_c) => {
+            // do not change error string, it is part of the defined protocol
+            return Err(make_protocol_error(
+                "Invalid or unsupported protocol version",
+            ))
+        }
+        _ => v,
+    };
+
     cursor.read_exact(&mut flag_bytes)?;
     cursor.read_exact(&mut stream_bytes)?;
     cursor.read_exact(&mut opcode_bytes)?;
     cursor.read_exact(&mut length_bytes)?;
 
-    let version = Version::from(version_bytes.to_vec());
     let flags = Flag::get_collection(flag_bytes[0]);
     let stream = from_u16_bytes(&stream_bytes);
     let opcode = Opcode::from(opcode_bytes[0]);
@@ -39,42 +67,43 @@ where
     // FIXME:
     //   Once a new feature to safely pass an uninitialized buffer to `Read` becomes available,
     //   we no longer need to zero-initialize `body_bytes` before passing to `Read`.
-    let mut body_bytes = vec![0; length];
-    cursor.read_exact(&mut body_bytes)?;
-
-    let full_body = if flags.iter().any(|flag| flag == &Flag::Compression) {
-        compressor
-            .decode(body_bytes)
-            .map_err(|err| error::Error::from(err.to_string()))?
-    } else {
-        body_bytes
-    };
-
-    // Use cursor to get tracing id, warnings and actual body
-    let mut body_cursor = Cursor::new(full_body.as_slice());
-
-    let tracing_id = if flags.iter().any(|flag| flag == &Flag::Tracing) {
-        let mut tracing_bytes = Vec::with_capacity(UUID_LEN);
-        unsafe {
-            tracing_bytes.set_len(UUID_LEN);
-        }
-        body_cursor.read_exact(&mut tracing_bytes)?;
-
-        decode_timeuuid(tracing_bytes.as_slice()).ok()
-    } else {
-        None
-    };
-
-    let warnings = if flags.iter().any(|flag| flag == &Flag::Warning) {
-        CStringList::from_cursor(&mut body_cursor)?.into_plain()
-    } else {
-        vec![]
-    };
-
     let mut body = vec![];
+    if (length > 0) {
+        let mut body_bytes = vec![0; length];
+        cursor.read_exact(&mut body_bytes)?;
 
-    body_cursor.read_to_end(&mut body)?;
+        let full_body = if flags.iter().any(|flag| flag == &Flag::Compression) {
+            compressor
+                .decode(body_bytes)
+                .map_err(|err| error::Error::from(err.to_string()))?
+        } else {
+            body_bytes
+        };
 
+        // Use cursor to get tracing id, warnings and actual body
+        let mut body_cursor = Cursor::new(full_body.as_slice());
+
+        let tracing_id = if flags.iter().any(|flag| flag == &Flag::Tracing) {
+            let mut tracing_bytes = Vec::with_capacity(UUID_LEN);
+            unsafe {
+                tracing_bytes.set_len(UUID_LEN);
+            }
+            body_cursor.read_exact(&mut tracing_bytes)?;
+
+            decode_timeuuid(tracing_bytes.as_slice()).ok()
+        } else {
+            None
+        };
+
+        let warnings = if flags.iter().any(|flag| flag == &Flag::Warning) {
+            CStringList::from_cursor(&mut body_cursor)?.into_plain()
+        } else {
+            vec![]
+        };
+
+
+        body_cursor.read_to_end(&mut body)?;
+    }
     let frame = Frame {
         version: version,
         flags: flags,
