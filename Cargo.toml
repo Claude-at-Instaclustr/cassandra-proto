@@ -21,3 +21,7 @@ rand = "0.4.1"
 snap = "0.2.3"
 time = "0.1.38"
 uuid = "0.8"
+
+[dev-dependencies]
+bytes = "1.0.0"
+uuid = { version = "0.8", features = ["v4"] }

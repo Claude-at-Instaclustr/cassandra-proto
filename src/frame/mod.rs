@@ -84,6 +84,7 @@ impl<'a> IntoBytes for Frame {
 pub enum Version {
     Request,
     Response,
+    Other(u8),
 }
 
 impl Version {
@@ -128,6 +129,22 @@ impl AsByte for Version {
         match self {
             &Version::Request => Version::request_version(),
             &Version::Response => Version::response_version(),
+            &Version::Other(code) => code,
+        }
+    }
+}
+
+impl From<u8> for Version {
+    fn from(v: u8) -> Version {
+        let req = Version::request_version();
+        let res = Version::response_version();
+
+        if v == req {
+            Version::Request
+        } else if v == res {
+            Version::Response
+        } else {
+            Version::Other(v)
         }
     }
 }
@@ -136,17 +153,18 @@ impl From<Vec<u8>> for Version {
     fn from(v: Vec<u8>) -> Version {
         if v.len() != Self::BYTE_LENGTH {
             error!(
-                "Unexpected Cassandra verion. Should has {} byte(-s), got {:?}",
+                "Unexpected Cassandra version. Should has {} byte(-s), got {:?}",
                 Self::BYTE_LENGTH,
                 v
             );
             panic!(
-                "Unexpected Cassandra verion. Should has {} byte(-s), got {:?}",
+                "Unexpected Cassandra version. Should has {} byte(-s), got {:?}",
                 Self::BYTE_LENGTH,
                 v
             );
         }
         let version = v[0];
+
         let req = Version::request_version();
         let res = Version::response_version();
 
@@ -155,14 +173,7 @@ impl From<Vec<u8>> for Version {
         } else if version == res {
             Version::Response
         } else {
-            error!(
-                "Unexpected Cassandra version {:?}, either {:?} or {:?} is expected",
-                version, req, res
-            );
-            panic!(
-                "Unexpected Cassandra version {:?}, either {:?} or {:?} is expected",
-                version, req, res
-            );
+            Version::Other(version)
         }
     }
 }

@@ -13,6 +13,7 @@ extern crate uuid;
 pub mod frame;
 pub mod query;
 pub mod types;
+pub mod compressors;
 
 pub mod compression;
 pub mod consistency;
