@@ -12,25 +12,18 @@ use crate::types::data_serialization_types::decode_timeuuid;
 use crate::types::CString;
 use crate::types::{from_bytes, from_u16_bytes, CStringList, UUID_LEN};
 
-
-/// Create a protocol error message
-fn make_protocol_error(msg: &str) -> CDRSError {
-    CDRSError {
-        error_code: 0x000A, // protocol error
-        message: CString::new(msg.to_string()),
-        additional_info: AdditionalErrorInfo::Protocol(SimpleError {}),
-    }
-}
-
-/// Create a server error message
-fn make_server_error(msg: &str) -> CDRSError {
-    CDRSError {
-        error_code: 0x0000, // server error
-        message: CString::new(msg.to_string()),
-        additional_info: AdditionalErrorInfo::Protocol(SimpleError {}),
-    }
-}
-
+/// Parses the frame.
+///
+/// Length of body is determined by `frame_header.length`.
+///
+/// # Arguments
+/// * `cursor_cell` - RefCell to create the cursor from.
+/// * `compressor` - The compressor implementation to decompress the body with.
+///
+/// # Returns
+/// * Frame - if the frame was read without error
+/// * CDRSError - containing an error if there was one.  My be system (0x0000) or protocol (0x000A)
+///
 pub fn parse_raw_frame<E>(
     cursor_cell: & RefCell<dyn Read>,
     compressor: & dyn Compressor<CompressorError = E>,
@@ -53,14 +46,14 @@ where
         match v {
             Version::Other(_c) => {
                 // do not change error string, it is part of the defined protocol
-                return Err(make_protocol_error(
+                return Err(frame_error::make_protocol_error(
                     "Invalid or unsupported protocol version",
                 ))
             },
             _ => v,
         }
     } else {
-        return Err(make_server_error(&y.unwrap_err().to_string()));
+        return Err(frame_error::make_server_error(&y.unwrap_err().to_string()));
     };
     if y.is_ok() {
         y = cursor.read_exact(&mut flag_bytes);
@@ -75,7 +68,7 @@ where
         y = cursor.read_exact(&mut length_bytes);
     }
     if y.is_err() {
-        return Err(make_server_error(&y.unwrap_err().to_string()));
+        return Err(frame_error::make_server_error(&y.unwrap_err().to_string()));
     }
 
 
@@ -92,16 +85,16 @@ where
         let mut body_bytes = vec![0 as u8; length];
         let y = cursor.read_exact(&mut body_bytes);
         if y.is_err() {
-            return Err(make_server_error(&y.unwrap_err().to_string()));
+            return Err(frame_error::make_server_error(&y.unwrap_err().to_string()));
         }
 
-            let full_body = extract_body_bytes(body_bytes, compressor, &flags)?;
+        let raw_body = extract_raw_body(body_bytes, compressor, &flags)?;
 
-            // read the body
+        // read the body
 
 
-            // Use cursor to get tracing id, warnings and actual body
-        let mut body_cursor = Cursor::new(full_body.as_slice());
+        // Use cursor to get tracing id, warnings and actual body
+        let mut body_cursor = Cursor::new(raw_body.as_slice());
 
             Frame {
                 version: version,
@@ -128,14 +121,14 @@ where
             stream: stream,
             body: vec![],
             tracing_id: if flags.iter().any(|flag| flag == &Flag::Tracing) {
-                return Err(make_protocol_error(
+                return Err(frame_error::make_protocol_error(
                     "Tracing flag set, no tracing ID provided",
                 ))
             } else {
                 None
             },
             warnings: if flags.iter().any(|flag| flag == &Flag::Warning) {
-                return Err(make_protocol_error(
+                return Err(frame_error::make_protocol_error(
                     "Warning flag set, no warnings provided",
                 ))
             } else {
@@ -147,82 +140,91 @@ where
     Ok(frame)
 }
 
-/// Reads the body from a Cursor.
+/// Reads the raw body from a vector.  The resulting body will include any
+/// tracing UUID or warnings as well as the body itself.
 ///
-/// Length of body is determined by `frame_header.length`.
+/// Extracts the body bytes and decompresses if the compression flag is set.
 ///
 /// # Arguments
-/// * `cursor` - The cursor to read the body from.
-/// * `length` - The expected length of the body.
+/// * `body_bytes` - the vector containing the body bytes, may be zero length.
 /// * `compressor` - The compressor implementation to decompress the body with.
+/// * `flags` - The flag vector from the Frame.
 ///
 /// # Returns
-/// * The body of the frame.
+/// * Vec<u8] - The body of the frame, may be zero length.
 /// * CDRSError - Server Error (0x0000) if the entire body can not be read or if the compressor
 /// fails.
 ///
-fn extract_body_bytes<E>( body_bytes : Vec<u8>,
-              compressor: &dyn Compressor<CompressorError = E>,
-            flags : &Vec<Flag>) -> Result<Vec<u8>,CDRSError>
+fn extract_raw_body<E>(body_bytes : Vec<u8>,
+                       compressor: &dyn Compressor<CompressorError = E>,
+                       flags : &Vec<Flag>) -> Result<Vec<u8>,CDRSError>
     where
         E: std::error::Error,
 {
     let full_body = if flags.iter().any(|flag| flag == &Flag::Compression) {
         compressor
             .decode(body_bytes)
-            .map_err(|err| make_server_error(&*format!("{} while uncompressing body", err.to_string())))?
+            .map_err(|err| frame_error::make_server_error(&*format!("{} while uncompressing body", err.to_string())))?
     } else {
         body_bytes
     };
 
     Ok(full_body)
-
 }
 
-/// Extracts the tracing ID from the current cursor position if the `frame_header.flags` contains
-/// the Tracing flag.
+/// Extracts the tracing ID from the cursor.
 ///
-/// If the flag is not set, returns `None` otherwise returns the UUID that is the tracing ID.
 /// # Arguments
 /// * `cursor` - The cursor to read the tracing id from.
+///
+/// # Returns
+/// * Uuid - The UUID extracted from the cursor.
+/// * CDRSError - Server Error (0x0000) if the UUID can not be read or parsed.
 ///
 fn extract_tracing_id(
     cursor: &mut Cursor<&[u8]>,
 ) -> Result<Option<uuid::Uuid>, CDRSError> {
     let mut tracing_bytes = [0 as u8; UUID_LEN];
     let x = cursor.read_exact(&mut tracing_bytes)
-        .map_err(|x| make_server_error(&*format!("{} while reading tracing id", x.to_string())));
+        .map_err(|x| frame_error::make_server_error(&*format!("{} while reading tracing id", x.to_string())));
     if x.is_err() {
         Err(x.unwrap_err())
     } else {
         decode_timeuuid(&tracing_bytes)
             .map(|x| Some(x))
-            .map_err(|x| make_server_error(&x.to_string()))
+            .map_err(|x| frame_error::make_server_error(&x.to_string()))
     }
 }
 
-/// Extracts the warnings from the current cursor position if the `frame_header.flags` contains
-/// the Warning flag.
+/// Extracts the warnings from the cursor.
 ///
-/// If the flag is not set, returns an empty Vec otherwise returns the Vec of warning messages.
 /// # Arguments
-/// * `frame_header` - The header for the frame being parsed.
 /// * `cursor` - The cursor to read the warnings from.
 ///
+/// # Returns
+/// * Vec<String> - A vector of warning text strings.
+/// * CDRSError - Server Error (0x0000) if the warnings can not be read and parsed.
 fn extract_warnings(
     cursor: &mut Cursor<&[u8]>,
 ) -> Result<Vec<String>, CDRSError> {
         CStringList::from_cursor(cursor)
-            .map_err(|x| make_server_error(&*format!("{} while extracting warnings", x.to_string())))
+            .map_err(|x| frame_error::make_server_error(&*format!("{} while extracting warnings", x.to_string())))
             .map(|x| x.into_plain())
 }
 
 /// Extracts the body from a cursor.
+///
+/// # Arguments
+/// * `cursor` - The cursor to read the body from.
+///
+/// # Returns
+/// * Vec<u8> - the contents of the body as bytes.
+/// * CDRSError - Server Error (0x0000) if the body can not be read.
 fn extract_body(cursor: &mut Cursor<&[u8]>) -> Result<Vec<u8>, CDRSError> {
     let mut body = vec![];
     let x = cursor
         .read_to_end(&mut body)
-        .map_err(|x| make_server_error(&*format!("{} while extracting body", x.to_string())));
+        .map_err(|x| frame_error::make_server_error(&*format!("{} while extracting body", x.to_string())));
     if x.is_err() {
         Err(x.unwrap_err())
     } else {
@@ -230,6 +232,15 @@ fn extract_body(cursor: &mut Cursor<&[u8]>) -> Result<Vec<u8>, CDRSError> {
     }
 }
 
+/// Parses a frame from a cursor.
+///
+/// # Arguments
+/// * `cursor` - The cursor to read the frame from.
+/// * `compressor` - The compressor implementation to decompress the body with.
+///
+/// # Returns
+/// * Frame - the read frame.
+/// * error::Error::Server - if any error occurs in the parsing.
 pub fn parse_frame<E>(
     cursor_cell: &RefCell<dyn Read>,
     compressor: &dyn Compressor<CompressorError = E>,

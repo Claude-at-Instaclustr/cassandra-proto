@@ -30,6 +30,35 @@ pub struct CDRSError {
     pub additional_info: AdditionalErrorInfo,
 }
 
+/// Create a protocol error message.  Error code 0x000A.
+/// # Arguments
+/// * `msg` - the message for the error.
+///
+/// # Returns
+/// * CDRSError - containing the error.
+///
+pub fn make_protocol_error(msg: &str) -> CDRSError {
+    CDRSError {
+        error_code: 0x000A, // protocol error
+        message: CString::new(msg.to_string()),
+        additional_info: AdditionalErrorInfo::Protocol(SimpleError {}),
+    }
+}
+
+/// Create a server error message.  Error code 0x0000.
+/// # Arguments
+/// * `msg` - the message for the error.
+///
+/// # Returns
+/// * CDRSError - containing the error.
+///
+pub fn make_server_error(msg: &str) -> CDRSError {
+    CDRSError {
+        error_code: 0x0000, // server error
+        message: CString::new(msg.to_string()),
+        additional_info: AdditionalErrorInfo::Protocol(SimpleError {}),
+    }
+}
 impl FromCursor for CDRSError {
     fn from_cursor(mut cursor: &mut io::Cursor<&[u8]>) -> error::Result<CDRSError> {
         let error_code = CInt::from_cursor(&mut cursor)?;
