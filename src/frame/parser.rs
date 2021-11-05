@@ -134,7 +134,13 @@ where
             } else {
                 None
             },
-            warnings: vec![],
+            warnings: if flags.iter().any(|flag| flag == &Flag::Warning) {
+                return Err(make_protocol_error(
+                    "Warning flag set, no warnings provided",
+                ))
+            } else {
+                vec![]
+            },
             flags: flags,
         }
     };
@@ -467,9 +473,9 @@ mod tests {
         assert_eq!( err.error_code, 0x000A ); // protocol error
         assert_eq!( err.message.as_str(), "Tracing flag set, no tracing ID provided" );
     }
-/*
+
     #[test]
-    fn test_extract_warnings() {
+    fn test_extract_warnings_from_body() {
         let mut buf = BytesMut::with_capacity(64);
         let compressor = NoCompression::new();
 
@@ -485,40 +491,34 @@ mod tests {
         buf.put_u8( Flag::Warning.as_byte() ); // flags (Warning)
         buf.put_u16( 0x0102 ); //stream
         buf.put_u8( 0x05 ); // opcode (Option)
-        buf.put_u32( 2+11+2+16+13 ); // length (see segments below)
+        buf.put_u32( 2+2+11+2+16+13 ); // length (see segments below)
 
         // string list comprising 2 strings
         buf.put_u16( 2 );
         // put in hello world
         buf.put_u16( 11);
         buf.put( "Hello World".as_bytes());
-        // put in "now is the time.."
+        // put in "now is the time."
         buf.put_u16( 16 );
         buf.put( "Now is the time.".as_bytes());
 
         // put in the body (13 bytes)
         buf.put( "What is this?".as_bytes());
 
-        let mut refcell = RefCell::new(buf.chunk());
-        let r = parse_raw_frame(&mut refcell, &compressor);
-        assert_eq!( r.is_ok(), true );
-        let opt = r.unwrap() ;
-        assert_eq!(opt.is_some(), true ); // no header read
-        let header = opt.unwrap();
-        assert_eq( frame.flags.iter().any(|flag| flag == &Flag::Warning), true);
-        assert_eq!( header.length, 2+11+2+16+13 );
-        let b = read_body(&header, &compressor, &mut buf );
-        let v = b.unwrap();
-        let mut cursor = Cursor::new(v.as_slice());
-        let r = extract_warnings( &header, &mut cursor);
-        assert_eq!( r.is_ok(), true );
-        let warnings = r.unwrap();
-        assert_eq!( warnings[0], "Hello World");
-        assert_eq!( warnings[1], "Now is the time.");
+        let cursor = Cursor::new( buf );
+        let refcell = RefCell::new(cursor);
+        let r = parse_raw_frame(& refcell, &compressor);
+        assert!( r.is_ok() );
+        let frame = r.unwrap();
+        assert_eq!( frame.flags.iter().any(|flag| flag == &Flag::Warning), true);
+        assert_eq!( frame.warnings[0], "Hello World");
+        assert_eq!( frame.warnings[1], "Now is the time.");
+        assert_eq!( frame.body.as_slice(), "What is this?".as_bytes());
+        assert!( frame.tracing_id.is_none());
     }
 
     #[test]
-    fn test_extract_warnings_no_flag() {
+    fn test_extract_warnings_from_body_no_flag() {
         let mut buf = BytesMut::with_capacity(64);
         let compressor = NoCompression::new();
 
@@ -534,7 +534,7 @@ mod tests {
         buf.put_u8( 0x0 ); // flags
         buf.put_u16( 0x0102 ); //stream
         buf.put_u8( 0x05 ); // opcode (Option)
-        buf.put_u32( 2+11+2+16+13 ); // length (see segments below)
+        buf.put_u32( 2+2+11+2+16+13 ); // length (see segments below)
 
         // string list comprising 2 strings
         buf.put_u16( 2 );
@@ -548,25 +548,18 @@ mod tests {
         // put in the body (13 bytes)
         buf.put( "What is this?".as_bytes());
 
-        let mut refcell = RefCell::new(buf.chunk());
-        let r = parse_raw_frame(&mut refcell, &compressor);
-        assert_eq!( r.is_ok(), true );
-        let opt = r.unwrap() ;
-        assert_eq!(opt.is_some(), true ); // no header read
-        let header = opt.unwrap();
-        assert_eq!( header.flags, 0x0 );
-        assert_eq!( header.length, 2+11+2+16+13 );
-        let b = read_body(&header, &compressor, &mut buf );
-        let v = b.unwrap();
-        let mut cursor = Cursor::new(v.as_slice());
-        let r = extract_warnings( &header, &mut cursor);
-        assert_eq!( r.is_ok(), true );
-        let warnings = r.unwrap();
-        assert_eq!( warnings.len(), 0);
+        let cursor = Cursor::new( buf );
+        let refcell = RefCell::new(cursor);
+        let r = parse_raw_frame(& refcell, &compressor);
+        assert!( r.is_ok() );
+        let frame = r.unwrap();
+        assert!( frame.flags.is_empty() );
+        assert!( frame.tracing_id.is_none());
+        assert!( frame.warnings.is_empty() );
     }
 
     #[test]
-    fn test_extract_warnings_no_data() {
+    fn test_extract_warnings_from_body_no_data() {
         let mut buf = BytesMut::with_capacity(64);
         let compressor = NoCompression::new();
 
@@ -584,31 +577,14 @@ mod tests {
         buf.put_u8( 0x05 ); // opcode (Option)
         buf.put_u32( 0 ); // length
 
-        let mut refcell = RefCell::new(buf.chunk());
-        let r = parse_raw_frame(&mut refcell, &compressor);
-        assert_eq!( r.is_ok(), true );
-        let opt = r.unwrap() ;
-        assert_eq!(opt.is_some(), true ); // no header read
-        let header = opt.unwrap();
-        assert_eq( frame.flags.iter().any(|flag| flag == &Flag::Warning), true);
-        assert_eq!( header.length, 0 );
-        let b = read_body(&header, &compressor, &mut buf );
-        let v = b.unwrap();
-        let mut cursor = Cursor::new(v.as_slice());
-        let r = extract_warnings( &header, &mut cursor);
-        assert_eq!( r.is_err(), true );
+        let cursor = Cursor::new( buf );
+        let refcell = RefCell::new(cursor);
+        let r = parse_raw_frame(& refcell, &compressor);
+        assert!( r.is_err() );
         let err = r.unwrap_err();
-        assert_eq!( err.error_code, 0x0000 ); // server error
-        assert_eq!( err.message.as_str(), "IO error: failed to fill whole buffer while extracting warnings" );
+        assert_eq!( err.error_code, 0x000A ); // protocol error
+        assert_eq!( err.message.as_str(), "Warning flag set, no warnings provided" );
     }
-
-    /*
-    pub fn parse_frame<E>(
-    mut src: &mut BytesMut,
-    compressor: &dyn Compressor<CompressorError = E>,
-    frame_header_original: Option<FrameHeader>,
-) -> Result<(Option<Frame>, Option<FrameHeader>), CDRSError>
-     */
 
     #[test]
     fn test_parse_frame() {
@@ -648,13 +624,11 @@ mod tests {
         buf.put( "What is this?".as_bytes());  // 13 bytes
 
 
-        let mut refcell = RefCell::new(buf.chunk());
-        let r = parse_raw_frame(&mut refcell, &compressor);
-        assert_eq!( r.is_ok(), true );
-        let (frame_opt, header_opt) = r.unwrap() ;
-        assert_eq!(frame_opt.is_some(), true );
-        assert_eq!(header_opt.is_none(), true );
-        let frame = frame_opt.unwrap();
+        let cursor = Cursor::new( buf );
+        let refcell = RefCell::new(cursor);
+        let r = parse_raw_frame(& refcell, &compressor);
+        assert!( r.is_ok() );
+        let frame = r.unwrap();
         assert_eq!( frame.flags.contains( &Flag::Tracing), true );
         assert_eq!( frame.flags.contains( &Flag::Warning), true );
         assert_eq!( frame.stream, 0x0102);
@@ -666,5 +640,32 @@ mod tests {
         assert_eq!( frame.warnings[1], "Now is the time." );
         assert_eq!( frame.body, "What is this?".as_bytes());
     }
-*/
+
+
+    #[test]
+    fn test_extract_warnings() {
+        let mut buf = BytesMut::with_capacity(64);
+
+
+        // string list comprising 2 strings
+        buf.put_u16(2);
+        // put in hello world
+        buf.put_u16(11);
+        buf.put("Hello World".as_bytes());
+        // put in "now is the time."
+        buf.put_u16(16);
+        buf.put("Now is the time.".as_bytes());
+
+        // put in the body (13 bytes)
+        buf.put("What is this?".as_bytes());
+
+        let mut cursor = Cursor::new( buf.as_ref());
+        //let refcell = RefCell::new(cursor);
+        let r = extract_warnings(&mut cursor, );
+        assert!( r.is_ok());
+        let v = r.unwrap();
+        assert_eq!( v[0], "Hello World");
+        assert_eq!( v[1], "Now is the time.");
+
+    }
 }
